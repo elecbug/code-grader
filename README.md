@@ -1,11 +1,11 @@
 # code-grader
 
-학생 과제 제출 현황 엑셀에서 **학번, 이름, GitHub 저장소 주소**를 수집하는 CLI입니다.
-lang-grader의 제출 목록 정리 기능을 바탕으로 엑셀 직접 읽기와 예외 처리를 구성했습니다.
+학생 과제 제출 현황 엑셀에서 **학번, 이름, GitHub 저장소 주소**를 수집하고, 제출한 저장소를 클론하는 CLI입니다.
+lang-grader의 제출 목록 정리와 여러 제출 주소 처리 규칙을 바탕으로 구성했습니다.
 
 ## 설치
 
-Python 3.10 이상이 필요합니다.
+Python 3.10 이상과 Git이 필요합니다.
 
 ```bash
 python3 -m venv .venv
@@ -88,8 +88,68 @@ Gist, raw 도메인, GitLab, 외부 파일 공유 주소 등은 모두 예외입
 
 예외에는 엑셀 시트명, 1부터 시작하는 행 번호, 학번, 이름, 주소 또는 제출 내용을 기록합니다.
 CSV는 학생당 한 행이며 여러 주소는 셀 안에서 줄바꿈으로 구분합니다. 예외 파일 경로는 `--exceptions-output`으로 바꿀 수 있습니다.
-처리에 성공하면 예외가 있어도 종료 코드는 `0`입니다. 파일 읽기, 헤더 확인, 결과 저장에 실패하면 `1`입니다.
-주소의 형식만 정리하며 GitHub 접속이나 저장소 존재 여부 확인은 수행하지 않습니다.
+`collect`는 처리에 성공하면 예외가 있어도 종료 코드는 `0`입니다. 파일 읽기, 헤더 확인, 결과 저장에 실패하면 `1`입니다.
+`collect`에서는 주소의 형식만 정리하며 GitHub에 접속하지 않습니다.
+
+## 저장소 클론
+
+먼저 `collect` 결과를 JSON으로 저장한 뒤 `clone`에 전달합니다.
+
+```bash
+code-grader collect "과제 제출 현황.xls" -o output/students.json
+
+# .env.example을 복사한 뒤 .env의 GITHUB_TOKEN 값을 입력
+cp .env.example .env
+
+code-grader clone output/students.json -o output/repositories
+
+# 마감 시각 이하의 커밋으로 체크아웃
+code-grader clone output/students.json -o output/deadline-repositories \
+  --limit "2026-11-02T23:59:59+09:00"
+
+# 네트워크에 접속하지 않고 클론 대상과 예외 확인
+code-grader clone output/students.json --dry-run --report output/clone-plan.json
+```
+
+`.env`에는 다음 형식으로 토큰을 입력합니다.
+
+```dotenv
+GITHUB_TOKEN=your_github_token
+```
+
+기본적으로 **명령을 실행한 현재 디렉터리의 `.env`**를 읽습니다. 다른 경로는 `--env-file /path/to/.env`로 지정합니다.
+환경변수 `GITHUB_TOKEN`이 이미 설정되어 있으면 해당 값이 우선합니다. 토큰이 없으면 공개 저장소에 익명으로 접근합니다.
+토큰은 Git 인증 헤더로 전달하며 클론 URL, `.git/config`, 리포트에 저장하지 않습니다. `.env`는 Git에서 제외합니다.
+
+### 여러 제출 주소 처리
+
+- 같은 학생이 같은 저장소의 여러 파일·디렉터리를 제출해도 **저장소를 한 번만 클론**합니다.
+- 서로 다른 저장소는 `<학번>/<소유자>/<저장소>`로 나눠 보관합니다. 학생이 다르면 별도로 보관합니다.
+- Git 저장소 전체를 클론하며, 제출한 파일·디렉터리 경로를 리포트에 기록합니다. 파일별로 저장소 내용을 잘라내지 않습니다.
+- 저장소 루트 URL은 기본 브랜치, `blob`/`tree` URL은 명시한 브랜치·태그·커밋을 사용합니다. `/`가 포함된 브랜치 이름도 실제 참조 목록으로 해석합니다.
+- 제출한 경로가 선택된 커밋에 존재하는지, 파일·디렉터리 유형이 맞는지 확인합니다.
+- 서로 다른 커밋의 제출은 Git worktree로 나눠 코드가 덮어써지지 않게 합니다. 같은 커밋의 링크는 작업 폴더를 공유합니다.
+- `--limit` 또는 입력 JSON의 최상위 `limit`이 있으면 해당 시각 이하의 커미터 시각을 가진 커밋을 선택합니다. CLI 옵션이 JSON보다 우선하며 시간대를 반드시 지정해야 합니다.
+- Gist·외부 도메인과 `edit`, `new`, `commit` 등 지원하지 않는 GitHub URL은 예외로 남깁니다. 지원하는 제출 형태는 저장소 루트, `blob`, `tree`입니다.
+- 일부 링크나 저장소 처리가 실패해도 나머지는 계속합니다. 기존 결과 폴더가 있으면 예외로 기록하고 보존합니다. 다시 수집할 때는 새 출력 디렉터리를 사용합니다.
+
+### 결과 구조
+
+```text
+output/repositories/
+├── clone-report.json
+└── 0012345/student/homework/
+    ├── submission.json
+    ├── repository/                # 첫 유효 제출의 커밋으로 체크아웃한 Git 저장소
+    └── checkouts/<commit>/        # 다른 커밋 제출이 있을 때 추가 Git worktree
+```
+
+`submission.json`과 전체 `clone-report.json`에는 학생 정보, 저장소 주소, 각 제출의 원본 URL·유형·참조·커밋·경로·작업 폴더를 기록합니다.
+수집 단계에서 발생한 예외는 전체 리포트의 `input_exceptions`에 보존합니다. 새 예외는 `exceptions`에 기록하며,
+브랜치·경로 해석 실패는 `submission_resolution_failed`, 클론 실패는 `clone_failed`, 기존 폴더는 `destination_exists` 등으로 구분합니다.
+
+`clone`은 새 예외가 없으면 `0`, 새 예외나 실행 오류가 있으면 `1`을 반환합니다. `--dry-run`은 브랜치·경로의 존재를 검증하지 않으며 기본적으로 파일을 만들지 않습니다.
+`--report`를 지정하면 처리 계획을 JSON으로 저장합니다. Git 작업별 제한 시간은 기본 120초이며 `--timeout`으로 변경합니다.
 
 ## 검증
 
@@ -97,4 +157,5 @@ CSV는 학생당 한 행이며 여러 주소는 셀 안에서 줄바꿈으로 �
 python -m unittest discover -s tests -v
 ```
 
-테스트는 익명으로 만든 입력을 사용합니다. 실제 학생 정보가 담긴 로컬 예제는 `.agent/`에 두며 Git에 포함하지 않습니다.
+테스트는 익명 입력과 로컬 Git 저장소를 사용해 인증 전달, 여러 제출, 브랜치, 마감 시각, 실패 처리를 검증합니다.
+실제 학생 정보가 담긴 로컬 예제는 `.agent/`에 두며 Git에 포함하지 않습니다.
