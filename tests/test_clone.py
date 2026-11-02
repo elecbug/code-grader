@@ -136,6 +136,19 @@ class GitCloneTests(unittest.TestCase):
         self.assertIn("https://github.com/student/homework.git", config)
         self.assertTrue((Path(item["directory"]) / "submission.json").is_file())
 
+    def test_cli_merges_cloned_repository_and_additional_worktree(self):
+        report = self.clone(["https://github.com/student/homework/blob/main/src/main.c",
+                             "https://github.com/student/homework/blob/feature/review/src/main.c"])
+        directory = Path(report["repositories"][0]["directory"])
+        proc = subprocess.run([sys.executable, "-m", "code_grader", "merge", str(directory)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = (directory / "merged_output.txt").read_text()
+        self.assertIn("# repository/src/main.c", text)
+        self.assertIn(f"# checkouts/{self.feature}/src/main.c", text)
+        self.assertIn("new version", text)
+        self.assertIn("feature version", text)
+        self.assertNotIn(".git/", text)
+
     def test_multiple_branches_and_slash_in_branch_name_have_separate_worktrees(self):
         report = self.clone(["https://github.com/student/homework/blob/main/src/main.c",
                              "https://github.com/student/homework/blob/feature/review/src/main.c"])

@@ -1,6 +1,6 @@
 # code-grader
 
-학생 과제 제출 현황 엑셀에서 **학번, 이름, GitHub 저장소 주소**를 수집하고, 제출한 저장소를 클론하는 CLI입니다.
+학생 과제 제출 현황 엑셀에서 **학번, 이름, GitHub 저장소 주소**를 수집하고, 저장소 클론과 소스 파일 병합을 수행하는 CLI입니다.
 lang-grader의 제출 목록 정리와 여러 제출 주소 처리 규칙을 바탕으로 구성했습니다.
 
 ## 설치
@@ -172,6 +172,42 @@ output/repositories/
 
 `clone`은 새 예외가 없으면 `0`, 새 예외나 실행 오류가 있으면 `1`을 반환합니다. `--dry-run`은 브랜치·경로의 존재를 검증하지 않으며 기본적으로 파일을 만들지 않습니다.
 `--report`를 지정하면 처리 계획을 JSON으로 저장합니다. Git 작업별 제한 시간은 기본 120초이며 `--timeout`으로 변경합니다.
+
+## 소스 파일 병합
+
+기존 lang-grader의 `merge.sh`처럼 디렉터리 안의 `.c`, `.h`, `.md`를 재귀적으로 찾아 상대 경로순으로 합칩니다.
+각 파일 앞에 `# 상대/경로`와 빈 줄을 붙이고, 파일 내용 뒤에 빈 줄을 넣습니다.
+
+```bash
+# 전체 클론 결과를 하나로 병합: output/repositories/merged_output.txt
+code-grader merge output/repositories
+
+# 특정 학생의 여러 저장소와 작업 폴더를 하나로 병합
+code-grader merge output/repositories/0012345
+
+# 결과 파일 경로 지정
+code-grader merge output/repositories -o output/all-submissions.txt
+
+# 파일을 만들지 않고 전체 내용을 화면에 출력
+code-grader merge output/repositories --stdout
+
+# 기존 all_merge.sh처럼 각 폴더에 merged_output.txt 생성
+code-grader merge output/repositories --all
+
+# 다른 언어의 파일을 포함하려면 확장자 지정
+code-grader merge output/repositories --extensions .py .java .md
+```
+
+기본 출력 파일은 대상 디렉터리의 `merged_output.txt`입니다. `--all`은 병합할 파일이 있는 폴더와 그 상위 폴더 각각에 결과를 생성하며,
+각 결과에는 해당 폴더의 하위 파일까지 포함합니다. `-o`, `--stdout`, `--all`은 하나만 선택할 수 있습니다.
+
+Git 내부 파일, 가상환경·의존성 폴더, 심볼릭 링크, 기존 `merged_output.txt`는 제외합니다.
+클론의 `repository`와 추가 `checkouts`는 상대 경로로 구별되어 함께 포함됩니다.
+UTF-8, CP949, EUC-KR과 BOM이 있는 UTF-16 입력을 읽고 결과는 UTF-8로 저장합니다.
+일반적인 한글 파일명과 공백이 있는 경로를 지원합니다.
+
+처리에 성공하면 종료 코드 `0`을 반환합니다. 읽지 못하는 파일이나 바이너리 파일은 표준 오류로 알리고 나머지를 병합한 뒤 `1`을 반환합니다.
+요약은 표준 오류에 출력하므로 `--stdout`의 표준 출력에는 병합 내용만 포함됩니다.
 
 ## 검증
 

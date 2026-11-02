@@ -11,11 +11,12 @@ from .auth import GitCredentials, load_token
 from .cloner import build_plan, clone_repositories, load_collection, parse_limit
 from .collector import collect
 from .git_client import GitClient
+from .merger import DEFAULT_EXTENSIONS, merge_all, merge_directory
 from .models import Collection, CollectionError
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="엑셀 과제 제출 정보를 정리하고 GitHub 저장소를 클론합니다.")
+    parser = argparse.ArgumentParser(description="과제 제출 정보 수집, GitHub 저장소 클론, 소스 파일 병합을 수행합니다.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     collect_parser = commands.add_parser("collect", help=".xls/.xlsx 제출 목록 정리")
@@ -35,6 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
     clone_parser.add_argument("--timeout", type=float, default=120.0, help="Git 작업별 제한 시간, 초 (기본: 120)")
     clone_parser.add_argument("--report", type=Path, help="클론 리포트 경로 (기본: 출력 디렉터리/clone-report.json)")
     clone_parser.add_argument("--dry-run", action="store_true", help="네트워크 접속과 클론 없이 처리 계획만 출력")
+    merge_parser = commands.add_parser("merge", help="소스 파일을 경로 제목과 함께 한 텍스트로 병합")
+    merge_parser.add_argument("directory", type=Path, help="재귀적으로 병합할 디렉터리")
+    merge_mode = merge_parser.add_mutually_exclusive_group()
+    merge_mode.add_argument("-o", "--output", type=Path, help="결과 파일 (기본: 대상 디렉터리/merged_output.txt)")
+    merge_mode.add_argument("--stdout", action="store_true", help="결과를 파일 대신 표준 출력으로 전달")
+    merge_mode.add_argument("--all", action="store_true", help="소스가 있는 각 하위 디렉터리에 merged_output.txt 생성")
+    merge_parser.add_argument("--extensions", nargs="+", default=DEFAULT_EXTENSIONS, metavar="EXT",
+                              help="포함할 확장자 (기본: .c .h .md)")
     return parser
 
 
@@ -58,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "clone":
             return run_clone(args)
+        if args.command == "merge":
+            return run_merge(args)
         output_format = args.format or ("csv" if args.output and args.output.suffix.lower() == ".csv" else "json")
         exceptions_output = args.exceptions_output
         if exceptions_output is None and args.output and output_format == "csv":
@@ -120,3 +131,20 @@ def run_clone(args: argparse.Namespace) -> int:
     for exception in result["exceptions"]:
         print(f"예외 [{exception['reason']}]: [{exception['student_id']}] {exception['url']}", file=sys.stderr)
     return 1 if result["exceptions"] else 0
+
+
+def run_merge(args: argparse.Namespace) -> int:
+    if args.all:
+        results, scan_errors = merge_all(args.directory, extensions=args.extensions)
+    else:
+        results = [merge_directory(args.directory, output=args.output, stream=sys.stdout if args.stdout else None,
+                                   extensions=args.extensions)]
+        scan_errors = []
+    errors = list(scan_errors)
+    for result in results:
+        destination = str(result.output) if result.output is not None else "표준 출력"
+        print(f"병합: {result.directory} → {destination} ({result.files}개 파일)", file=sys.stderr)
+        errors.extend(result.errors)
+    for path, message in errors:
+        print(f"병합 오류: {path}: {message}", file=sys.stderr)
+    return 1 if errors else 0
