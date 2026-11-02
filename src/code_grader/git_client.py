@@ -73,6 +73,15 @@ class GitClient:
     def path_type(self, repo: Path, commit: str, path: str) -> str:
         return self.run("cat-file", "-t", f"{commit}:{path}", repo=repo)
 
+    def ensure_commit(self, repo: Path, commit: str) -> str:
+        try:
+            return self.resolve_commit(repo, commit)
+        except GitError:
+            # A force push may have removed the deadline commit from current
+            # branch history. Ask the same origin for that exact object.
+            self.run("fetch", "--no-tags", "origin", commit, repo=repo)
+            return self.resolve_commit(repo, commit)
+
     def checkout(self, repo: Path, commit: str) -> None:
         self.run("checkout", "--detach", commit, repo=repo)
 

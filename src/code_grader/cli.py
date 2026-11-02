@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     clone_parser.add_argument("-o", "--output", type=Path, default=Path("output/repositories"), help="클론 결과 디렉터리 (기본: output/repositories)")
     clone_parser.add_argument("--env-file", type=Path, help="토큰을 읽을 .env 경로 (기본: 현재 디렉터리의 .env)")
     clone_parser.add_argument("--limit", help="마감 시각 (시간대 포함 ISO 8601, 생략하면 입력 JSON의 limit 또는 최신 커밋)")
+    clone_parser.add_argument("--limit-basis", choices=("commit", "push"), default="commit",
+                              help="마감 기준: commit=커미터 시각, push=GitHub에 푸시된 시각 (기본: commit)")
     clone_parser.add_argument("--timeout", type=float, default=120.0, help="Git 작업별 제한 시간, 초 (기본: 120)")
     clone_parser.add_argument("--report", type=Path, help="클론 리포트 경로 (기본: 출력 디렉터리/clone-report.json)")
     clone_parser.add_argument("--dry-run", action="store_true", help="네트워크 접속과 클론 없이 처리 계획만 출력")
@@ -107,7 +109,8 @@ def run_clone(args: argparse.Namespace) -> int:
     plans, exceptions = build_plan(data)
     git = GitClient(GitCredentials(load_token(args.env_file)), args.timeout)
     result = clone_repositories(plans, args.output, git, limit=limit, dry_run=args.dry_run,
-                                exceptions=exceptions, input_exceptions=data.get("exceptions", []))
+                                exceptions=exceptions, input_exceptions=data.get("exceptions", []),
+                                limit_basis=args.limit_basis)
     if not args.dry_run or args.report:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

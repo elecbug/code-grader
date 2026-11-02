@@ -29,6 +29,13 @@ class GitCredentials:
         self._token = token
         self._encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode() if token else ""
 
+    def api_headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "code-grader",
+                   "X-GitHub-Api-Version": "2026-03-10"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
+
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")

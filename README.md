@@ -107,6 +107,10 @@ code-grader clone output/students.json -o output/repositories
 code-grader clone output/students.json -o output/deadline-repositories \
   --limit "2026-11-02T23:59:59+09:00"
 
+# GitHub에 실제 푸시된 시각으로 마감 판정
+code-grader clone output/students.json -o output/push-deadline-repositories \
+  --limit "2026-11-02T23:59:59+09:00" --limit-basis push
+
 # 네트워크에 접속하지 않고 클론 대상과 예외 확인
 code-grader clone output/students.json --dry-run --report output/clone-plan.json
 ```
@@ -129,9 +133,26 @@ GITHUB_TOKEN=your_github_token
 - 저장소 루트 URL은 기본 브랜치, `blob`/`tree` URL은 명시한 브랜치·태그·커밋을 사용합니다. `/`가 포함된 브랜치 이름도 실제 참조 목록으로 해석합니다.
 - 제출한 경로가 선택된 커밋에 존재하는지, 파일·디렉터리 유형이 맞는지 확인합니다.
 - 서로 다른 커밋의 제출은 Git worktree로 나눠 코드가 덮어써지지 않게 합니다. 같은 커밋의 링크는 작업 폴더를 공유합니다.
-- `--limit` 또는 입력 JSON의 최상위 `limit`이 있으면 해당 시각 이하의 커미터 시각을 가진 커밋을 선택합니다. CLI 옵션이 JSON보다 우선하며 시간대를 반드시 지정해야 합니다.
+- `--limit` 또는 입력 JSON의 최상위 `limit`이 있으면 지정한 마감 기준으로 커밋을 선택합니다. CLI 옵션이 JSON보다 우선하며 시간대를 반드시 지정해야 합니다.
 - Gist·외부 도메인과 `edit`, `new`, `commit` 등 지원하지 않는 GitHub URL은 예외로 남깁니다. 지원하는 제출 형태는 저장소 루트, `blob`, `tree`입니다.
 - 일부 링크나 저장소 처리가 실패해도 나머지는 계속합니다. 기존 결과 폴더가 있으면 예외로 기록하고 보존합니다. 다시 수집할 때는 새 출력 디렉터리를 사용합니다.
+
+### 마감 판정 기준
+
+`--limit-basis commit`이 기본값이며 커미터 시각으로 마감 커밋을 고릅니다.
+`--limit-basis push`는 [GitHub 저장소 활동 API](https://docs.github.com/en/rest/repos/repos#list-repository-activities)를 조회해
+**제출 브랜치에서 마감 시각 이하에 일어난 마지막 푸시 직후의 커밋**을 선택합니다. 강제 푸시나 병합으로 바뀐 브랜치 상태도 활동 이력에 따라 판단합니다.
+API 인증에도 `.env`의 같은 토큰을 사용합니다.
+
+예를 들어 커밋 시각이 오전 10시여도 오후 6시에 처음 푸시했다면 정오 마감에는 포함하지 않습니다.
+반대로 마감 뒤에 추가 푸시가 있어도, 마감 전에 받아들여진 마지막 푸시의 코드 상태를 선택합니다.
+저장소 전체의 마지막 푸시 시각과 다른 브랜치의 활동은 제출 브랜치의 마감 판정에 사용하지 않습니다.
+
+활동 기록에 접근할 수 없거나 마감 이하의 기록을 확인하지 못하면 `push_api_failed` 또는 `push_history_unavailable` 예외로 남깁니다.
+커미터 시각으로 자동 대체하지 않습니다. 커밋 SHA만 포함한 URL은 브랜치 푸시 이력을 특정할 수 없어 `push_ref_required` 예외입니다.
+강제 푸시로 현재 이력에서 사라진 커밋은 동일 저장소에서 SHA로 가져오며, 가져올 수 없으면 `push_commit_unavailable` 예외로 남깁니다.
+마감 시각 당시 브랜치가 삭제된 상태였다면 `ref_deleted_at_limit` 예외입니다.
+마감 시각을 지정하지 않으면 두 모드 모두 현재 제출 참조의 최신 커밋을 사용하며 활동 API를 조회하지 않습니다.
 
 ### 결과 구조
 
@@ -145,6 +166,7 @@ output/repositories/
 ```
 
 `submission.json`과 전체 `clone-report.json`에는 학생 정보, 저장소 주소, 각 제출의 원본 URL·유형·참조·커밋·경로·작업 폴더를 기록합니다.
+마감 판정 기준은 `limit_basis`에 기록합니다. 푸시 기준으로 판정한 제출에는 `pushed_at`, `push_activity_id`, `push_ref`, `push_type`도 기록합니다.
 수집 단계에서 발생한 예외는 전체 리포트의 `input_exceptions`에 보존합니다. 새 예외는 `exceptions`에 기록하며,
 브랜치·경로 해석 실패는 `submission_resolution_failed`, 클론 실패는 `clone_failed`, 기존 폴더는 `destination_exists` 등으로 구분합니다.
 

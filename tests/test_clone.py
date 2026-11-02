@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from code_grader.auth import GitCredentials
 from code_grader.cloner import build_plan, clone_repositories, parse_limit, parse_submission
-from code_grader.git_client import GitClient
+from code_grader.git_client import GitClient, GitError
+from code_grader.github_activity import GitHubActivityClient, PushLookupError
 from code_grader.models import CollectionError
 
 
@@ -167,6 +168,77 @@ class GitCloneTests(unittest.TestCase):
         self.assertEqual(report["exceptions"][0]["reason"], "submission_resolution_failed")
         self.assertFalse(Path(report["repositories"][0]["directory"]).exists())
 
+    def test_push_basis_excludes_old_commits_that_were_pushed_after_deadline(self):
+        limit = parse_limit("2026-03-01T00:00:00Z")
+        activity = GitHubActivityClient(self.client.credentials)
+        events = [dict(id=2, ref="refs/heads/main", after=self.new, pushed_at="2026-03-02T00:00:00Z", push_type="normal"),
+                  dict(id=1, ref="refs/heads/main", after=self.old, pushed_at="2026-01-02T00:00:00Z", push_type="normal")]
+        with patch.object(activity, "_page", return_value=(events, None)) as page:
+            report = self.clone(["https://github.com/student/homework/blob/main/src/main.c",
+                                 "https://github.com/student/homework/blob/main/src/math.h"],
+                                limit=limit, limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(page.call_count, 1)
+        first = report["repositories"][0]["submissions"][0]
+        self.assertEqual(first["commit"], self.old)
+        self.assertEqual(first["pushed_at"], "2026-01-02T00:00:00+00:00")
+        self.assertEqual(first["push_activity_id"], "1")
+        self.assertEqual(self.client.resolve_commit(Path(first["checkout"]), "refs/remotes/origin/main", limit), self.new)
+        self.assertEqual((Path(first["checkout"]) / "src/main.c").read_text(), "old version\n")
+
+    def test_push_basis_uses_push_time_even_when_commit_clock_is_in_the_future(self):
+        activity = GitHubActivityClient(self.client.credentials)
+        events = [dict(id=1, ref="refs/heads/main", after=self.new, pushed_at="2026-01-02T00:00:00Z", push_type="normal")]
+        with patch.object(activity, "_page", return_value=(events, None)):
+            report = self.clone(["https://github.com/student/homework"], limit=parse_limit("2026-01-10T00:00:00Z"),
+                                limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(report["repositories"][0]["submissions"][0]["commit"], self.new)
+
+    def test_push_lookup_failure_is_an_exception_without_commit_date_fallback(self):
+        activity = GitHubActivityClient(self.client.credentials)
+        with patch.object(activity, "last_push", side_effect=PushLookupError("push_history_unavailable", "missing")):
+            report = self.clone(["https://github.com/student/homework"], limit=parse_limit("2026-03-01T00:00:00Z"),
+                                limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"][0]["reason"], "push_history_unavailable")
+        self.assertEqual(report["repositories"][0]["submissions"], [])
+        self.assertFalse(Path(report["repositories"][0]["directory"]).exists())
+
+    def test_push_mode_without_deadline_uses_head_without_calling_api(self):
+        activity = GitHubActivityClient(self.client.credentials)
+        with patch.object(activity, "last_push", side_effect=AssertionError("unexpected API call")):
+            report = self.clone(["https://github.com/student/homework"], limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(report["repositories"][0]["submissions"][0]["commit"], self.new)
+
+    def test_force_pushed_deadline_commit_can_be_fetched_from_same_origin(self):
+        self.git("checkout", "--orphan", "rewritten", repo=self.work)
+        (self.work / "src/main.c").write_text("rewritten version\n")
+        self.commit("rewritten history", "2026-03-01T00:00:00+00:00")
+        remote = self.root / "remotes/student/homework.git"
+        self.git("push", "--force", str(remote), "rewritten:main", repo=self.work)
+        self.git("update-ref", "-d", "refs/heads/feature/review", repo=remote)
+        self.git("config", "uploadpack.allowAnySHA1InWant", "true", repo=remote)
+        activity = GitHubActivityClient(self.client.credentials)
+        events = [dict(id=1, ref="refs/heads/main", after=self.new, pushed_at="2026-02-02T00:00:00Z", push_type="normal")]
+        with patch.object(activity, "_page", return_value=(events, None)), patch.object(self.client, "run", wraps=self.client.run) as run:
+            report = self.clone(["https://github.com/student/homework"], limit=parse_limit("2026-02-15T00:00:00Z"),
+                                limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"], [])
+        self.assertTrue(any(call.args[0] == "fetch" for call in run.call_args_list))
+        item = report["repositories"][0]["submissions"][0]
+        self.assertEqual(item["commit"], self.new)
+        self.assertEqual((Path(item["checkout"]) / "src/main.c").read_text(), "new version\n")
+
+    def test_missing_push_commit_is_an_exception_without_a_different_checkout(self):
+        activity = GitHubActivityClient(self.client.credentials)
+        events = [dict(id=1, ref="refs/heads/main", after=self.old, pushed_at="2026-01-02T00:00:00Z", push_type="normal")]
+        with patch.object(activity, "_page", return_value=(events, None)), patch.object(self.client, "ensure_commit", side_effect=GitError("unavailable")):
+            report = self.clone(["https://github.com/student/homework"], limit=parse_limit("2026-03-01T00:00:00Z"),
+                                limit_basis="push", activity_client=activity)
+        self.assertEqual(report["exceptions"][0]["reason"], "push_commit_unavailable")
+        self.assertEqual(report["repositories"][0]["submissions"], [])
+
     def test_bad_submission_does_not_stop_other_submissions(self):
         report = self.clone(["https://github.com/student/homework/blob/main/src/missing.c",
                              "https://github.com/student/homework/tree/main/src/main.c",
@@ -214,14 +286,16 @@ class GitCloneTests(unittest.TestCase):
         self.assertNotIn("env_file_test_token", proc.stdout + proc.stderr)
         self.assertNotIn("env_file_test_token", (self.output / "clone-report.json").read_text())
 
-    def test_cli_dry_run_saves_plan_without_creating_clone_directory(self):
+    def test_cli_dry_run_saves_push_basis_plan_without_creating_clone_directory(self):
         source = self.root / "students.json"
         source.write_text(json.dumps(collection(["https://github.com/student/homework"])))
         target = self.root / "plan.json"
         proc = subprocess.run([sys.executable, "-m", "code_grader", "clone", str(source), "-o", str(self.output),
-                               "--dry-run", "--report", str(target)], capture_output=True, text=True)
+                               "--dry-run", "--report", str(target), "--limit", "2026-03-01T00:00:00Z",
+                               "--limit-basis", "push"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(target.read_text())["repositories"][0]["status"], "planned")
+        self.assertEqual(json.loads(target.read_text())["limit_basis"], "push")
         self.assertFalse(self.output.exists())
 
     def test_cli_report_cannot_overwrite_credentials(self):

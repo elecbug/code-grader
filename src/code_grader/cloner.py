@@ -9,6 +9,7 @@ import tempfile
 from urllib.parse import unquote, urlsplit
 
 from .git_client import GitClient, GitError
+from .github_activity import GitHubActivityClient, PushLookupError
 from .models import CollectionError
 from .urls import normalize_text, normalize_url, repository_url, submission_key
 
@@ -116,13 +117,25 @@ def build_plan(data: dict) -> tuple[list[RepositoryPlan], list[dict]]:
 
 
 def _resolve_submission(git: GitClient, repo: Path, submission: Submission,
-                        refs: dict[str, str], limit: datetime | None) -> dict:
+                        refs: dict[str, str], limit: datetime | None, *, limit_basis: str = "commit",
+                        activity: GitHubActivityClient | None = None, repo_url: str = "") -> dict:
     if submission.kind == "repository":
         label, ref = git.default_ref(repo)
         path = ""
     else:
         label, ref, path = git.resolve_path_ref(submission.tail, refs)
-    commit = git.resolve_commit(repo, ref, limit)
+    push = None
+    if limit is not None and limit_basis == "push":
+        if activity is None:
+            raise PushLookupError("push_api_failed", "GitHub 활동 API 클라이언트가 필요합니다.")
+        push_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1) if ref.startswith("refs/remotes/origin/") else ref
+        push = activity.last_push(repo_url, push_ref, limit)
+        try:
+            commit = git.ensure_commit(repo, push.commit)
+        except GitError as exc:
+            raise PushLookupError("push_commit_unavailable", "푸시 기록의 커밋을 가져오지 못했습니다. 다른 커밋으로 대체하지 않습니다.") from exc
+    else:
+        commit = git.resolve_commit(repo, ref, limit)
     if submission.kind == "file" and not path:
         raise GitError("파일 제출 URL에 파일 경로가 없습니다.")
     if path:
@@ -132,14 +145,24 @@ def _resolve_submission(git: GitClient, repo: Path, submission: Submission,
         expected = "blob" if submission.kind == "file" else "tree"
         if actual != expected:
             raise GitError(f"제출 경로의 유형이 일치하지 않습니다: {path}")
-    return dict(url=submission.url, kind=submission.kind, ref=label, commit=commit, path=path)
+    result = dict(url=submission.url, kind=submission.kind, ref=label, commit=commit, path=path,
+                  limit_basis=limit_basis if limit is not None else None)
+    if push is not None:
+        result.update(pushed_at=push.pushed_at, push_activity_id=push.activity_id,
+                      push_ref=push.ref, push_type=push.push_type)
+    return result
 
 
 def clone_repositories(plans: list[RepositoryPlan], output: Path, git: GitClient,
                        *, limit: datetime | None = None, dry_run: bool = False,
-                       exceptions: list[dict] | None = None, input_exceptions: list | None = None) -> dict:
+                       exceptions: list[dict] | None = None, input_exceptions: list | None = None,
+                       limit_basis: str = "commit", activity_client: GitHubActivityClient | None = None) -> dict:
+    if limit_basis not in {"commit", "push"}:
+        raise CollectionError("마감 기준은 commit 또는 push여야 합니다.")
+    if limit is not None and limit_basis == "push" and activity_client is None:
+        activity_client = GitHubActivityClient(git.credentials, git.timeout)
     output = output.resolve()
-    report = dict(limit=limit.isoformat() if limit else None, repositories=[],
+    report = dict(limit=limit.isoformat() if limit else None, limit_basis=limit_basis, repositories=[],
                   exceptions=list(exceptions or []), input_exceptions=list(input_exceptions or []))
     if not dry_run:
         output.mkdir(parents=True, exist_ok=True)
@@ -171,9 +194,11 @@ def clone_repositories(plans: list[RepositoryPlan], output: Path, git: GitClient
                 resolved = []
                 for submission in plan.submissions:
                     try:
-                        resolved.append(_resolve_submission(git, source, submission, refs, limit))
+                        resolved.append(_resolve_submission(git, source, submission, refs, limit,
+                                                            limit_basis=limit_basis, activity=activity_client,
+                                                            repo_url=plan.repository_url))
                     except GitError as exc:
-                        exception("submission_resolution_failed", str(exc), submission.url)
+                        exception(getattr(exc, "reason", "submission_resolution_failed"), str(exc), submission.url)
                 if not resolved:
                     item["status"] = "failed"
                     continue
