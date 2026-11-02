@@ -11,7 +11,7 @@ from .auth import GitCredentials, load_token
 from .cloner import build_plan, clone_repositories, load_collection, parse_limit
 from .collector import collect
 from .git_client import GitClient
-from .merger import DEFAULT_EXTENSIONS, merge_all, merge_directory
+from .merger import DEFAULT_EXTENSIONS, archive_directory, merge_all, merge_directory
 from .models import Collection, CollectionError
 
 
@@ -36,14 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
     clone_parser.add_argument("--timeout", type=float, default=120.0, help="Git 작업별 제한 시간, 초 (기본: 120)")
     clone_parser.add_argument("--report", type=Path, help="클론 리포트 경로 (기본: 출력 디렉터리/clone-report.json)")
     clone_parser.add_argument("--dry-run", action="store_true", help="네트워크 접속과 클론 없이 처리 계획만 출력")
-    merge_parser = commands.add_parser("merge", help="소스 파일을 경로 제목과 함께 한 텍스트로 병합")
+    merge_parser = commands.add_parser("merge", help="소스 텍스트 병합 또는 학생 폴더를 보존한 전체 ZIP 생성")
     merge_parser.add_argument("directory", type=Path, help="재귀적으로 병합할 디렉터리")
+    merge_parser.add_argument("-o", "--output", type=Path, help="결과 파일 (텍스트: 대상/merged_output.txt, ZIP: 대상 디렉터리 옆의 <이름>.zip)")
     merge_mode = merge_parser.add_mutually_exclusive_group()
-    merge_mode.add_argument("-o", "--output", type=Path, help="결과 파일 (기본: 대상 디렉터리/merged_output.txt)")
     merge_mode.add_argument("--stdout", action="store_true", help="결과를 파일 대신 표준 출력으로 전달")
     merge_mode.add_argument("--all", action="store_true", help="소스가 있는 각 하위 디렉터리에 merged_output.txt 생성")
-    merge_parser.add_argument("--extensions", nargs="+", default=DEFAULT_EXTENSIONS, metavar="EXT",
-                              help="포함할 확장자 (기본: .c .h .md)")
+    merge_mode.add_argument("--zip", action="store_true", help="학생별 폴더와 원본 파일을 하나의 ZIP으로 저장 (-o .zip도 자동 인식)")
+    merge_parser.add_argument("--extensions", nargs="+", metavar="EXT",
+                              help="포함할 확장자 (텍스트 기본: .c .h .md, ZIP 기본: 모든 파일)")
     return parser
 
 
@@ -68,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "clone":
             return run_clone(args)
         if args.command == "merge":
+            if args.output is not None and (args.stdout or args.all):
+                parser.error("merge의 -o는 --stdout 또는 --all과 함께 사용할 수 없습니다.")
             return run_merge(args)
         output_format = args.format or ("csv" if args.output and args.output.suffix.lower() == ".csv" else "json")
         exceptions_output = args.exceptions_output
@@ -134,16 +137,22 @@ def run_clone(args: argparse.Namespace) -> int:
 
 
 def run_merge(args: argparse.Namespace) -> int:
-    if args.all:
-        results, scan_errors = merge_all(args.directory, extensions=args.extensions)
+    is_zip = args.zip or (args.output is not None and args.output.suffix.lower() == ".zip")
+    extensions = args.extensions if args.extensions is not None else DEFAULT_EXTENSIONS
+    if is_zip:
+        results = [archive_directory(args.directory, output=args.output, extensions=args.extensions)]
+        scan_errors = []
+    elif args.all:
+        results, scan_errors = merge_all(args.directory, extensions=extensions)
     else:
         results = [merge_directory(args.directory, output=args.output, stream=sys.stdout if args.stdout else None,
-                                   extensions=args.extensions)]
+                                   extensions=extensions)]
         scan_errors = []
     errors = list(scan_errors)
     for result in results:
         destination = str(result.output) if result.output is not None else "표준 출력"
-        print(f"병합: {result.directory} → {destination} ({result.files}개 파일)", file=sys.stderr)
+        label = "ZIP" if is_zip else "병합"
+        print(f"{label}: {result.directory} → {destination} ({result.files}개 파일)", file=sys.stderr)
         errors.extend(result.errors)
     for path, message in errors:
         print(f"병합 오류: {path}: {message}", file=sys.stderr)

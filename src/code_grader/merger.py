@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import TextIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from .models import CollectionError
 
@@ -143,3 +144,51 @@ def merge_all(directory: Path, *, extensions: list[str] | tuple[str, ...] = DEFA
         except OSError as exc:
             results.append(MergeResult(folder, folder / DEFAULT_OUTPUT, errors=[(folder, str(exc))]))
     return results, scan_errors
+
+
+def archive_directory(directory: Path, *, output: Path | None = None,
+                      extensions: list[str] | tuple[str, ...] | None = None) -> MergeResult:
+    """Archive the complete directory tree, keeping student folders and bytes.
+
+    ZIP output includes all file types and existing merged_output.txt files.
+    Only Git internals, symlinks, special files and the output ZIP are skipped.
+    """
+    root = _root(directory)
+    output = Path(os.path.abspath(output)) if output is not None else root.parent / f"{root.name}.zip"
+    selected = normalize_extensions(extensions) if extensions is not None else None
+    entries = []
+
+    def onerror(error: OSError) -> None:
+        # A ZIP advertised as the whole submission must not silently omit an
+        # unreadable directory. Keep an existing output intact on failure.
+        raise error
+
+    for current, dirs, names in os.walk(root, followlinks=False, onerror=onerror):
+        current = Path(current)
+        dirs[:] = sorted(name for name in dirs if name != ".git" and not (current / name).is_symlink())
+        entries.extend(current / name for name in dirs)
+        for name in names:
+            path = current / name
+            if name == ".git" or path == output or path.is_symlink() or not path.is_file():
+                continue
+            if selected is None or path.suffix.lower() in selected:
+                entries.append(path)
+
+    result = MergeResult(root, output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".archive-", suffix=".tmp", dir=output.parent, delete=False) as target:
+            temporary = Path(target.name)
+        with ZipFile(temporary, "w", compression=ZIP_DEFLATED, strict_timestamps=False) as archive:
+            for path in sorted(entries, key=lambda item: item.relative_to(root).as_posix()):
+                archive.write(path, arcname=path.relative_to(root).as_posix())
+                if path.is_file():
+                    result.files += 1
+        os.replace(temporary, output)
+    except (UnicodeError, ValueError, RuntimeError) as exc:
+        raise CollectionError(f"ZIP 파일을 생성하지 못했습니다: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return result

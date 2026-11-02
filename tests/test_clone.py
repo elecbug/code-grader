@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from code_grader.auth import GitCredentials
 from code_grader.cloner import build_plan, clone_repositories, parse_limit, parse_submission
@@ -148,6 +149,21 @@ class GitCloneTests(unittest.TestCase):
         self.assertIn("new version", text)
         self.assertIn("feature version", text)
         self.assertNotIn(".git/", text)
+
+    def test_cli_archives_multiple_students_with_their_clone_structure(self):
+        data = collection(["https://github.com/student/homework"])
+        data["students"].append({"student_id":"0012346", "name":"김학생", "repository_urls":["https://github.com/student/homework"]})
+        plans, exceptions = build_plan(data)
+        report = clone_repositories(plans, self.output, self.client, exceptions=exceptions)
+        self.assertEqual(report["summary"]["cloned"], 2)
+        output = self.root / "전체 제출.zip"
+        proc = subprocess.run([sys.executable, "-m", "code_grader", "merge", str(self.output), "--zip", "-o", str(output)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with ZipFile(output) as archive:
+            for student_id in ("0012345", "0012346"):
+                self.assertEqual(archive.read(f"{student_id}/student/homework/repository/src/main.c"), b"new version\n")
+                self.assertIn(f"{student_id}/student/homework/submission.json", archive.namelist())
+            self.assertFalse(any(".git" in Path(name).parts for name in archive.namelist()))
 
     def test_multiple_branches_and_slash_in_branch_name_have_separate_worktrees(self):
         report = self.clone(["https://github.com/student/homework/blob/main/src/main.c",
