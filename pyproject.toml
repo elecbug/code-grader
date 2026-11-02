@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-grader"
+version = "0.1.0"
+description = "Collect student identities and GitHub submission links from Excel exports."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["xlrd>=2.0.2,<3", "openpyxl>=3.1.5,<4"]
+
+[project.scripts]
+code-grader = "code_grader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
